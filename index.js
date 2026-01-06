@@ -7,23 +7,32 @@ app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 8080;
-const CHROME_PATH = process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome-stable';
+const BROWSERLESS_TOKEN = process.env.BROWSERLESS_TOKEN;
 
-const browserOptions = {
-  headless: 'new',
-  executablePath: CHROME_PATH,
-  args: [
-    '--no-sandbox',
-    '--disable-setuid-sandbox',
-    '--disable-dev-shm-usage',
-    '--disable-gpu',
-    '--single-process',
-  ],
-};
+// Browserless.io 사용
+async function getBrowser() {
+  if (BROWSERLESS_TOKEN) {
+    return puppeteer.connect({
+      browserWSEndpoint: `wss://chrome.browserless.io?token=${BROWSERLESS_TOKEN}`,
+    });
+  }
+  // 로컬 폴백
+  return puppeteer.launch({
+    headless: 'new',
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome-stable',
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--single-process',
+    ],
+  });
+}
 
 // Instagram 다운로드
 async function downloadInstagram(url) {
-  const browser = await puppeteer.launch(browserOptions);
+  const browser = await getBrowser();
 
   const results = [];
 
@@ -104,7 +113,7 @@ async function downloadInstagram(url) {
 
 // YouTube 다운로드
 async function downloadYouTube(url) {
-  const browser = await puppeteer.launch(browserOptions);
+  const browser = await getBrowser();
 
   const results = [];
 
@@ -167,7 +176,7 @@ async function downloadYouTube(url) {
 
 // Facebook 다운로드
 async function downloadFacebook(url) {
-  const browser = await puppeteer.launch(browserOptions);
+  const browser = await getBrowser();
 
   const results = [];
 
