@@ -1,25 +1,29 @@
 const express = require('express');
 const cors = require('cors');
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer-core');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 8080;
+const CHROME_PATH = process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome-stable';
+
+const browserOptions = {
+  headless: 'new',
+  executablePath: CHROME_PATH,
+  args: [
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-dev-shm-usage',
+    '--disable-gpu',
+    '--single-process',
+  ],
+};
 
 // Instagram 다운로드
 async function downloadInstagram(url) {
-  const browser = await puppeteer.launch({
-    headless: 'new',
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-gpu',
-      '--single-process',
-    ],
-  });
+  const browser = await puppeteer.launch(browserOptions);
 
   const results = [];
 
@@ -100,10 +104,7 @@ async function downloadInstagram(url) {
 
 // YouTube 다운로드
 async function downloadYouTube(url) {
-  const browser = await puppeteer.launch({
-    headless: 'new',
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-  });
+  const browser = await puppeteer.launch(browserOptions);
 
   const results = [];
 
@@ -166,10 +167,7 @@ async function downloadYouTube(url) {
 
 // Facebook 다운로드
 async function downloadFacebook(url) {
-  const browser = await puppeteer.launch({
-    headless: 'new',
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-  });
+  const browser = await puppeteer.launch(browserOptions);
 
   const results = [];
 
