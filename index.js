@@ -6,6 +6,7 @@ app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 8080;
+const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY || 'c70a4490f2msh651124d28d83985p1e7c82jsnd8d17fb88f81';
 
 const headers = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -20,82 +21,88 @@ async function downloadInstagram(url) {
   const results = [];
 
   try {
-    const shortcode = url.match(/\/(p|reel|reels|tv)\/([A-Za-z0-9_-]+)/)?.[2];
-    if (!shortcode) {
-      console.log('Invalid shortcode');
-      return results;
-    }
+    console.log('Trying RapidAPI for Instagram:', url);
 
-    console.log('Shortcode:', shortcode);
-
-    // 1. Embed 페이지 시도
-    const embedUrl = `https://www.instagram.com/p/${shortcode}/embed/captioned/`;
-    console.log('Fetching embed:', embedUrl);
-
-    const embedRes = await fetch(embedUrl, { headers });
-    const embedHtml = await embedRes.text();
-    console.log('Embed HTML length:', embedHtml.length);
-
-    // video_url 패턴 찾기
-    const videoPatterns = [
-      /"video_url"\s*:\s*"([^"]+)"/g,
-      /"contentUrl"\s*:\s*"([^"]+)"/g,
-      /video_url['"]\s*:\s*['"]([^'"]+)['"]/g,
+    // RapidAPI Instagram Downloader 시도
+    const apis = [
+      {
+        name: 'instagram-media-downloader',
+        url: `https://instagram-media-downloader.p.rapidapi.com/rapid/post.php?url=${encodeURIComponent(url)}`,
+        host: 'instagram-media-downloader.p.rapidapi.com',
+      },
+      {
+        name: 'instagram-downloader-download-instagram-videos-stories1',
+        url: `https://instagram-downloader-download-instagram-videos-stories1.p.rapidapi.com/?url=${encodeURIComponent(url)}`,
+        host: 'instagram-downloader-download-instagram-videos-stories1.p.rapidapi.com',
+      },
+      {
+        name: 'save-insta1',
+        url: `https://save-insta1.p.rapidapi.com/media?url=${encodeURIComponent(url)}`,
+        host: 'save-insta1.p.rapidapi.com',
+      },
     ];
 
-    for (const pattern of videoPatterns) {
-      let match;
-      while ((match = pattern.exec(embedHtml)) !== null) {
-        let videoUrl = match[1]
-          .replace(/\\u0026/g, '&')
-          .replace(/\\\//g, '/')
-          .replace(/&amp;/g, '&');
-
-        if (!results.find(r => r.url === videoUrl)) {
-          console.log('Found video URL');
-          results.push({ type: 'video', url: videoUrl, quality: 'HD' });
-        }
-      }
-    }
-
-    // 2. 이미지 추출 (비디오 없으면)
-    if (results.length === 0) {
-      const imgMatch = embedHtml.match(/class="EmbeddedMediaImage"[^>]*src="([^"]+)"/);
-      if (imgMatch) {
-        results.push({ type: 'image', url: imgMatch[1].replace(/&amp;/g, '&') });
-      }
-
-      // og:image
-      const ogImgMatch = embedHtml.match(/<meta[^>]*property="og:image"[^>]*content="([^"]+)"/);
-      if (ogImgMatch && !results.find(r => r.url === ogImgMatch[1])) {
-        results.push({ type: 'image', url: ogImgMatch[1].replace(/&amp;/g, '&') });
-      }
-    }
-
-    // 3. 외부 API 시도 (비디오 못찾으면)
-    if (!results.find(r => r.type === 'video')) {
+    for (const api of apis) {
       try {
-        // SnapSave API
-        const snapRes = await fetch('https://snapsave.app/action.php', {
-          method: 'POST',
+        console.log('Trying:', api.name);
+        const response = await fetch(api.url, {
           headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'User-Agent': headers['User-Agent'],
-            'Origin': 'https://snapsave.app',
-            'Referer': 'https://snapsave.app/',
+            'X-RapidAPI-Key': RAPIDAPI_KEY,
+            'X-RapidAPI-Host': api.host,
           },
-          body: `url=${encodeURIComponent(url)}`,
         });
 
-        if (snapRes.ok) {
-          const snapData = await snapRes.text();
-          const videoMatch = snapData.match(/href="([^"]+\.mp4[^"]*)"/);
-          if (videoMatch) {
-            results.push({ type: 'video', url: videoMatch[1], quality: 'HD' });
+        if (response.ok) {
+          const data = await response.json();
+          console.log('Response from', api.name, ':', JSON.stringify(data).substring(0, 200));
+
+          // 다양한 응답 형식 처리
+          if (data.video) {
+            results.push({ type: 'video', url: data.video, quality: 'HD' });
+          }
+          if (data.video_url) {
+            results.push({ type: 'video', url: data.video_url, quality: 'HD' });
+          }
+          if (data.download_url) {
+            results.push({ type: 'video', url: data.download_url, quality: 'HD' });
+          }
+          if (data.media && Array.isArray(data.media)) {
+            for (const m of data.media) {
+              if (m.video) results.push({ type: 'video', url: m.video, quality: 'HD' });
+              if (m.url) results.push({ type: m.type || 'video', url: m.url, quality: 'HD' });
+            }
+          }
+          if (data.result && Array.isArray(data.result)) {
+            for (const r of data.result) {
+              if (r.url) results.push({ type: r.type || 'video', url: r.url, quality: 'HD' });
+            }
+          }
+          if (data.image) {
+            results.push({ type: 'image', url: data.image });
+          }
+
+          if (results.length > 0) {
+            console.log('Found', results.length, 'results from', api.name);
+            break;
           }
         }
       } catch (e) {
-        console.log('SnapSave failed:', e.message);
+        console.log(api.name, 'failed:', e.message);
+      }
+    }
+
+    // 폴백: Embed 페이지
+    if (results.length === 0) {
+      const shortcode = url.match(/\/(p|reel|reels|tv)\/([A-Za-z0-9_-]+)/)?.[2];
+      if (shortcode) {
+        const embedUrl = `https://www.instagram.com/p/${shortcode}/embed/captioned/`;
+        const embedRes = await fetch(embedUrl, { headers });
+        const embedHtml = await embedRes.text();
+
+        const imgMatch = embedHtml.match(/class="EmbeddedMediaImage"[^>]*src="([^"]+)"/);
+        if (imgMatch) {
+          results.push({ type: 'image', url: imgMatch[1].replace(/&amp;/g, '&') });
+        }
       }
     }
 
