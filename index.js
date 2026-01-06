@@ -1,178 +1,163 @@
 const express = require('express');
 const cors = require('cors');
-const puppeteer = require('puppeteer-core');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 8080;
-const BROWSERLESS_TOKEN = process.env.BROWSERLESS_TOKEN;
 
-// Browserless.io 사용
-async function getBrowser() {
-  if (BROWSERLESS_TOKEN) {
-    return puppeteer.connect({
-      browserWSEndpoint: `wss://chrome.browserless.io?token=${BROWSERLESS_TOKEN}`,
-    });
-  }
-  // 로컬 폴백
-  return puppeteer.launch({
-    headless: 'new',
-    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome-stable',
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-gpu',
-      '--single-process',
-    ],
-  });
-}
+const headers = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+  'Accept-Language': 'en-US,en;q=0.5',
+  'Sec-Fetch-Dest': 'document',
+  'Sec-Fetch-Mode': 'navigate',
+};
 
 // Instagram 다운로드
 async function downloadInstagram(url) {
   const results = [];
-  let browser;
 
   try {
-    // shortcode 추출
     const shortcode = url.match(/\/(p|reel|reels|tv)\/([A-Za-z0-9_-]+)/)?.[2];
     if (!shortcode) {
-      console.error('Invalid Instagram URL');
+      console.log('Invalid shortcode');
       return results;
     }
 
-    console.log('Connecting to browser...');
-    browser = await getBrowser();
-    console.log('Browser connected');
+    console.log('Shortcode:', shortcode);
 
-    const page = await browser.newPage();
+    // 1. Embed 페이지 시도
+    const embedUrl = `https://www.instagram.com/p/${shortcode}/embed/captioned/`;
+    console.log('Fetching embed:', embedUrl);
 
-    await page.setUserAgent(
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    );
+    const embedRes = await fetch(embedUrl, { headers });
+    const embedHtml = await embedRes.text();
+    console.log('Embed HTML length:', embedHtml.length);
 
-    // 네트워크 요청 모니터링
-    const videoUrls = new Set();
+    // video_url 패턴 찾기
+    const videoPatterns = [
+      /"video_url"\s*:\s*"([^"]+)"/g,
+      /"contentUrl"\s*:\s*"([^"]+)"/g,
+      /video_url['"]\s*:\s*['"]([^'"]+)['"]/g,
+    ];
 
-    page.on('response', async (response) => {
-      const resUrl = response.url();
-      if (resUrl.includes('.mp4') || (resUrl.includes('video') && resUrl.includes('cdninstagram'))) {
-        console.log('Found video URL:', resUrl.substring(0, 100));
-        videoUrls.add(resUrl);
-      }
-    });
+    for (const pattern of videoPatterns) {
+      let match;
+      while ((match = pattern.exec(embedHtml)) !== null) {
+        let videoUrl = match[1]
+          .replace(/\\u0026/g, '&')
+          .replace(/\\\//g, '/')
+          .replace(/&amp;/g, '&');
 
-    // embed 페이지 사용 (로그인 불필요)
-    const embedUrl = `https://www.instagram.com/p/${shortcode}/embed/`;
-    console.log('Going to:', embedUrl);
-
-    await page.goto(embedUrl, { waitUntil: 'networkidle0', timeout: 20000 });
-    console.log('Page loaded');
-
-    // 비디오 요소에서 src 추출
-    const videoSrc = await page.evaluate(() => {
-      const video = document.querySelector('video');
-      return video ? (video.src || video.querySelector('source')?.src) : null;
-    });
-
-    if (videoSrc) {
-      results.push({ type: 'video', url: videoSrc, quality: 'HD' });
-    }
-
-    // 네트워크에서 캡처된 비디오 URL
-    for (const vUrl of videoUrls) {
-      if (!results.find(r => r.url === vUrl)) {
-        results.push({ type: 'video', url: vUrl, quality: 'HD' });
+        if (!results.find(r => r.url === videoUrl)) {
+          console.log('Found video URL');
+          results.push({ type: 'video', url: videoUrl, quality: 'HD' });
+        }
       }
     }
 
-    // 이미지 추출
+    // 2. 이미지 추출 (비디오 없으면)
     if (results.length === 0) {
-      const imageData = await page.evaluate(() => {
-        const img = document.querySelector('.EmbeddedMediaImage') ||
-                    document.querySelector('img[src*="cdninstagram"]');
-        return img ? img.src : null;
-      });
+      const imgMatch = embedHtml.match(/class="EmbeddedMediaImage"[^>]*src="([^"]+)"/);
+      if (imgMatch) {
+        results.push({ type: 'image', url: imgMatch[1].replace(/&amp;/g, '&') });
+      }
 
-      if (imageData) {
-        results.push({ type: 'image', url: imageData });
+      // og:image
+      const ogImgMatch = embedHtml.match(/<meta[^>]*property="og:image"[^>]*content="([^"]+)"/);
+      if (ogImgMatch && !results.find(r => r.url === ogImgMatch[1])) {
+        results.push({ type: 'image', url: ogImgMatch[1].replace(/&amp;/g, '&') });
       }
     }
 
-    console.log('Results:', results.length);
+    // 3. 외부 API 시도 (비디오 못찾으면)
+    if (!results.find(r => r.type === 'video')) {
+      try {
+        // SnapSave API
+        const snapRes = await fetch('https://snapsave.app/action.php', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'User-Agent': headers['User-Agent'],
+            'Origin': 'https://snapsave.app',
+            'Referer': 'https://snapsave.app/',
+          },
+          body: `url=${encodeURIComponent(url)}`,
+        });
+
+        if (snapRes.ok) {
+          const snapData = await snapRes.text();
+          const videoMatch = snapData.match(/href="([^"]+\.mp4[^"]*)"/);
+          if (videoMatch) {
+            results.push({ type: 'video', url: videoMatch[1], quality: 'HD' });
+          }
+        }
+      } catch (e) {
+        console.log('SnapSave failed:', e.message);
+      }
+    }
+
+    console.log('Total results:', results.length);
 
   } catch (error) {
     console.error('Instagram error:', error.message);
-  } finally {
-    if (browser) {
-      await browser.close();
-      console.log('Browser closed');
-    }
   }
 
   return results;
 }
 
-// YouTube 다운로드
+// YouTube 다운로드 (fetch 방식)
 async function downloadYouTube(url) {
-  const browser = await getBrowser();
-
   const results = [];
 
   try {
-    const page = await browser.newPage();
-    await page.setUserAgent(
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    );
+    let videoId = url.match(/(?:v=|\/)([\w-]{11})(?:\?|&|$)/)?.[1];
+    if (!videoId) {
+      videoId = url.match(/youtu\.be\/([\w-]{11})/)?.[1];
+    }
+    if (!videoId) return results;
 
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    console.log('Video ID:', videoId);
 
-    // ytInitialPlayerResponse에서 스트림 정보 추출
-    const videoData = await page.evaluate(() => {
-      if (window.ytInitialPlayerResponse) {
-        const data = window.ytInitialPlayerResponse;
+    const response = await fetch(`https://www.youtube.com/watch?v=${videoId}`, { headers });
+    const html = await response.text();
+
+    // ytInitialPlayerResponse 추출
+    const playerMatch = html.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});/s);
+    if (playerMatch) {
+      try {
+        const playerData = JSON.parse(playerMatch[1]);
         const formats = [
-          ...(data.streamingData?.formats || []),
-          ...(data.streamingData?.adaptiveFormats || []),
+          ...(playerData.streamingData?.formats || []),
+          ...(playerData.streamingData?.adaptiveFormats || []),
         ];
 
-        const videos = formats
-          .filter(f => f.url && f.mimeType?.includes('video'))
-          .map(f => ({
-            url: f.url,
-            quality: f.qualityLabel || f.quality,
-            mimeType: f.mimeType,
-          }));
+        const title = playerData.videoDetails?.title || 'YouTube Video';
 
-        return {
-          title: data.videoDetails?.title,
-          thumbnail: data.videoDetails?.thumbnail?.thumbnails?.slice(-1)[0]?.url,
-          videos,
-        };
-      }
-      return null;
-    });
+        for (const format of formats) {
+          if (format.url && format.mimeType?.includes('video')) {
+            results.push({
+              type: 'video',
+              url: format.url,
+              quality: format.qualityLabel || format.quality || 'Unknown',
+              title,
+            });
+          }
+        }
 
-    if (videoData) {
-      for (const v of videoData.videos) {
-        results.push({
-          type: 'video',
-          url: v.url,
-          quality: v.quality,
-          title: videoData.title,
-        });
-      }
-      if (videoData.thumbnail) {
-        results.push({ type: 'image', url: videoData.thumbnail, title: videoData.title });
+        const thumbnail = playerData.videoDetails?.thumbnail?.thumbnails?.slice(-1)[0]?.url;
+        if (thumbnail) {
+          results.push({ type: 'image', url: thumbnail, title });
+        }
+      } catch (e) {
+        console.log('JSON parse error:', e.message);
       }
     }
 
   } catch (error) {
     console.error('YouTube error:', error.message);
-  } finally {
-    await browser.close();
   }
 
   return results;
@@ -180,58 +165,35 @@ async function downloadYouTube(url) {
 
 // Facebook 다운로드
 async function downloadFacebook(url) {
-  const browser = await getBrowser();
-
   const results = [];
 
   try {
-    const page = await browser.newPage();
-    await page.setUserAgent(
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    );
+    const response = await fetch(url, { headers });
+    const html = await response.text();
 
-    // 네트워크 요청 모니터링
-    const videoUrls = new Set();
+    const videoPatterns = [
+      /"playable_url":"([^"]+)"/g,
+      /"playable_url_quality_hd":"([^"]+)"/g,
+      /"sd_src":"([^"]+)"/g,
+      /"hd_src":"([^"]+)"/g,
+    ];
 
-    page.on('response', async (response) => {
-      const resUrl = response.url();
-      if (resUrl.includes('.mp4') || (resUrl.includes('video') && resUrl.includes('fbcdn'))) {
-        videoUrls.add(resUrl);
-      }
-    });
+    for (const pattern of videoPatterns) {
+      let match;
+      while ((match = pattern.exec(html)) !== null) {
+        let videoUrl = match[1]
+          .replace(/\\u0026/g, '&')
+          .replace(/\\\//g, '/');
 
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
-
-    // 페이지에서 비디오 URL 추출
-    const pageVideos = await page.evaluate(() => {
-      const videos = [];
-
-      // video 태그에서 src 추출
-      document.querySelectorAll('video').forEach(v => {
-        if (v.src) videos.push(v.src);
-      });
-
-      // JSON-LD에서 추출
-      document.querySelectorAll('script[type="application/ld+json"]').forEach(script => {
-        try {
-          const data = JSON.parse(script.textContent);
-          if (data.contentUrl) videos.push(data.contentUrl);
-        } catch (e) {}
-      });
-
-      return videos;
-    });
-
-    for (const vUrl of [...pageVideos, ...videoUrls]) {
-      if (!results.find(r => r.url === vUrl)) {
-        results.push({ type: 'video', url: vUrl, quality: 'HD' });
+        if (!results.find(r => r.url === videoUrl)) {
+          const isHD = match[0].includes('hd');
+          results.push({ type: 'video', url: videoUrl, quality: isHD ? 'HD' : 'SD' });
+        }
       }
     }
 
   } catch (error) {
     console.error('Facebook error:', error.message);
-  } finally {
-    await browser.close();
   }
 
   return results;
@@ -239,12 +201,16 @@ async function downloadFacebook(url) {
 
 // API 엔드포인트
 app.post('/download', async (req, res) => {
+  const startTime = Date.now();
+
   try {
     const { url } = req.body;
 
     if (!url) {
       return res.status(400).json({ error: 'URL is required' });
     }
+
+    console.log('Processing:', url);
 
     let results = [];
 
@@ -264,6 +230,8 @@ app.post('/download', async (req, res) => {
         ? `video_${Date.now()}_${index}.mp4`
         : `image_${Date.now()}_${index}.jpg`,
     }));
+
+    console.log(`Done in ${Date.now() - startTime}ms, ${media.length} results`);
 
     res.json({ success: true, media });
   } catch (error) {
