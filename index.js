@@ -32,11 +32,21 @@ async function getBrowser() {
 
 // Instagram 다운로드
 async function downloadInstagram(url) {
-  const browser = await getBrowser();
-
   const results = [];
+  let browser;
 
   try {
+    // shortcode 추출
+    const shortcode = url.match(/\/(p|reel|reels|tv)\/([A-Za-z0-9_-]+)/)?.[2];
+    if (!shortcode) {
+      console.error('Invalid Instagram URL');
+      return results;
+    }
+
+    console.log('Connecting to browser...');
+    browser = await getBrowser();
+    console.log('Browser connected');
+
     const page = await browser.newPage();
 
     await page.setUserAgent(
@@ -47,65 +57,59 @@ async function downloadInstagram(url) {
     const videoUrls = new Set();
 
     page.on('response', async (response) => {
-      const url = response.url();
-      if (url.includes('.mp4') || url.includes('video') && url.includes('cdninstagram')) {
-        videoUrls.add(url);
+      const resUrl = response.url();
+      if (resUrl.includes('.mp4') || (resUrl.includes('video') && resUrl.includes('cdninstagram'))) {
+        console.log('Found video URL:', resUrl.substring(0, 100));
+        videoUrls.add(resUrl);
       }
     });
 
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+    // embed 페이지 사용 (로그인 불필요)
+    const embedUrl = `https://www.instagram.com/p/${shortcode}/embed/`;
+    console.log('Going to:', embedUrl);
+
+    await page.goto(embedUrl, { waitUntil: 'networkidle0', timeout: 20000 });
+    console.log('Page loaded');
 
     // 비디오 요소에서 src 추출
     const videoSrc = await page.evaluate(() => {
       const video = document.querySelector('video');
-      if (video) {
-        return video.src || video.querySelector('source')?.src;
-      }
-      return null;
+      return video ? (video.src || video.querySelector('source')?.src) : null;
     });
 
     if (videoSrc) {
       results.push({ type: 'video', url: videoSrc, quality: 'HD' });
     }
 
-    // 네트워크에서 캡처된 비디오 URL 추가
+    // 네트워크에서 캡처된 비디오 URL
     for (const vUrl of videoUrls) {
       if (!results.find(r => r.url === vUrl)) {
         results.push({ type: 'video', url: vUrl, quality: 'HD' });
       }
     }
 
-    // 이미지 추출 (비디오 없을 경우)
+    // 이미지 추출
     if (results.length === 0) {
-      const images = await page.evaluate(() => {
-        const imgs = [];
-        document.querySelectorAll('img').forEach(img => {
-          if (img.src && img.src.includes('cdninstagram') && img.width > 300) {
-            imgs.push(img.src);
-          }
-        });
-        return imgs;
+      const imageData = await page.evaluate(() => {
+        const img = document.querySelector('.EmbeddedMediaImage') ||
+                    document.querySelector('img[src*="cdninstagram"]');
+        return img ? img.src : null;
       });
 
-      for (const imgUrl of images) {
-        results.push({ type: 'image', url: imgUrl });
+      if (imageData) {
+        results.push({ type: 'image', url: imageData });
       }
     }
 
-    // og:video 메타 태그 확인
-    const ogVideo = await page.evaluate(() => {
-      const meta = document.querySelector('meta[property="og:video"]');
-      return meta ? meta.content : null;
-    });
-
-    if (ogVideo && !results.find(r => r.url === ogVideo)) {
-      results.push({ type: 'video', url: ogVideo, quality: 'HD' });
-    }
+    console.log('Results:', results.length);
 
   } catch (error) {
     console.error('Instagram error:', error.message);
   } finally {
-    await browser.close();
+    if (browser) {
+      await browser.close();
+      console.log('Browser closed');
+    }
   }
 
   return results;
